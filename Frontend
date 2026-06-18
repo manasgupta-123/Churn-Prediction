@@ -1,1 +1,355 @@
 
+from flask import Flask, render_template, jsonify, request, session, redirect, url_for, make_response
+import random, csv, io, json
+from functools import wraps
+from datetime import datetime
+
+app = Flask(__name__)
+app.secret_key = "clientpulse_secret_2024"
+
+# ── Demo credentials ──────────────────────────────────────────────────────────
+DEMO_USERS = {
+    "admin@clientpulse.com":   {"password": "Admin@123",  "role": "Admin",   "name": "Binal Setia"},
+    "analyst@clientpulse.com": {"password": "Analyst@123","role": "Analyst", "name": "Ayushi Dahiya"},
+    "viewer@clientpulse.com":  {"password": "Viewer@123", "role": "Viewer",  "name": "Rahul Kumar"},
+}
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "user" not in session:
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
+
+# ── Model results ─────────────────────────────────────────────────────────────
+MODEL_RESULTS = {
+    "xgboost": {
+        "name": "XGBoost", "accuracy": 91.9, "precision": 72.6,
+        "recall": 96.0, "f1": 82.7, "auc": 0.94,
+        "confusion": {"tn": 14004, "fp": 1596, "fn": 175, "tp": 4225},
+        "total_test": 20000,
+    },
+    "random_forest": {
+        "name": "Random Forest", "accuracy": 82.8, "precision": 99.9,
+        "recall": 22.1, "f1": 36.1, "auc": 0.87,
+        "confusion": {"tn": 15596, "fp": 4, "fn": 3429, "tp": 971},
+        "total_test": 20000,
+    },
+}
+
+FEATURE_IMPORTANCE = {
+    "xgboost": [
+        {"feature": "Last_Active_Days_Ago",   "importance": 0.312},
+        {"feature": "Complaints_Last_6M",     "importance": 0.198},
+        {"feature": "Monthly_Transactions",   "importance": 0.154},
+        {"feature": "Avg_Transaction_Amount", "importance": 0.121},
+        {"feature": "Login_Frequency",        "importance": 0.089},
+        {"feature": "Support_Tickets",        "importance": 0.063},
+        {"feature": "Account_Age_Months",     "importance": 0.038},
+        {"feature": "Failed_Transactions",    "importance": 0.025},
+    ],
+    "random_forest": [
+        {"feature": "Last_Active_Days_Ago",   "importance": 0.298},
+        {"feature": "Complaints_Last_6M",     "importance": 0.187},
+        {"feature": "Monthly_Transactions",   "importance": 0.162},
+        {"feature": "Avg_Transaction_Amount", "importance": 0.133},
+        {"feature": "Login_Frequency",        "importance": 0.095},
+        {"feature": "Account_Age_Months",     "importance": 0.071},
+        {"feature": "Support_Tickets",        "importance": 0.034},
+        {"feature": "Failed_Transactions",    "importance": 0.020},
+    ],
+}
+
+CITIES = {
+    "Delhi":      {"coords": [28.6139, 77.2090], "state": "Delhi"},
+    "Mumbai":     {"coords": [19.0760, 72.8777], "state": "Maharashtra"},
+    "Lucknow":    {"coords": [26.8467, 80.9462], "state": "Uttar Pradesh"},
+    "Bangalore":  {"coords": [12.9716, 77.5946], "state": "Karnataka"},
+    "Chennai":    {"coords": [13.0827, 80.2707], "state": "Tamil Nadu"},
+    "Kolkata":    {"coords": [22.5726, 88.3639], "state": "West Bengal"},
+    "Hyderabad":  {"coords": [17.3850, 78.4867], "state": "Telangana"},
+    "Pune":       {"coords": [18.5204, 73.8567], "state": "Maharashtra"},
+    "Ahmedabad":  {"coords": [23.0225, 72.5714], "state": "Gujarat"},
+    "Jaipur":     {"coords": [26.9124, 75.7873], "state": "Rajasthan"},
+    "Surat":      {"coords": [21.1702, 72.8311], "state": "Gujarat"},
+    "Kanpur":     {"coords": [26.4499, 80.3319], "state": "Uttar Pradesh"},
+    "Nagpur":     {"coords": [21.1458, 79.0882], "state": "Maharashtra"},
+    "Patna":      {"coords": [25.5941, 85.1376], "state": "Bihar"},
+    "Bhopal":     {"coords": [23.2599, 77.4126], "state": "Madhya Pradesh"},
+    "Indore":     {"coords": [22.7196, 75.8577], "state": "Madhya Pradesh"},
+    "Chandigarh": {"coords": [30.7333, 76.7794], "state": "Punjab"},
+    "Kochi":      {"coords": [9.9312,  76.2673], "state": "Kerala"},
+    "Coimbatore": {"coords": [11.0168, 76.9558], "state": "Tamil Nadu"},
+    "Guwahati":   {"coords": [26.1445, 91.7362], "state": "Assam"},
+}
+
+random.seed(42)
+
+def weighted_churn():
+    r = random.random() * 100
+    if r < 2.8:  return "High"
+    if r < 11.4: return "Medium"
+    return "Low"
+
+FIRST = ["Aarav","Priya","Rahul","Sneha","Vikram","Ananya","Rohit","Kavya",
+         "Amit","Pooja","Suresh","Meera","Arjun","Divya","Karan","Nisha",
+         "Deepak","Swati","Nikhil","Riya","Ajay","Sunita","Manish","Shreya",
+         "Tarun","Preeti","Gaurav","Neha","Siddharth","Ankita","Varun","Simran"]
+LAST  = ["Sharma","Verma","Singh","Gupta","Patel","Joshi","Kumar","Mishra",
+         "Agarwal","Yadav","Tiwari","Chauhan","Pandey","Mehta","Shah","Nair",
+         "Reddy","Iyer","Pillai","Bose","Sen","Das","Roy","Ghosh"]
+
+USERS = []
+city_list = list(CITIES.keys())
+for i in range(100000):
+    city  = city_list[i % len(city_list)]
+    churn = weighted_churn()
+    USERS.append({
+        "id":          i + 1,
+        "name":        f"{random.choice(FIRST)} {random.choice(LAST)}",
+        "city":        city,
+        "churn":       churn,
+        "transactions": random.randint(1,20)   if churn=="High"   else
+                        random.randint(10,60)  if churn=="Medium" else
+                        random.randint(30,200),
+        "last_active": random.randint(30,180)  if churn=="High"   else
+                       random.randint(10,60)   if churn=="Medium" else
+                       random.randint(1,15),
+        "complaints":  random.randint(3,10)    if churn=="High"   else
+                       random.randint(1,4)     if churn=="Medium" else
+                       random.randint(0,1),
+        "phone":       f"9{random.randint(100000000,999999999)}",
+        "risk_score":  round(random.uniform(0.70,0.99),2) if churn=="High"   else
+                       round(random.uniform(0.35,0.69),2) if churn=="Medium" else
+                       round(random.uniform(0.01,0.34),2),
+        "account_age": random.randint(1, 24),
+        "avg_txn":     round(random.uniform(100, 5000), 2),
+        "login_freq":  random.randint(1, 5) if churn=="High" else random.randint(3, 15),
+    })
+
+# ── Campaign store (in-memory) ────────────────────────────────────────────────
+CAMPAIGNS = [
+    {
+        "id": 1, "name": "Win-Back High Risk Users", "status": "Active",
+        "target": "High", "reach": 2821, "opened": 1243, "converted": 412,
+        "created": "2024-11-01", "type": "Email",
+        "message": "We miss you! Come back and enjoy 0% UPI charges for 30 days.",
+    },
+    {
+        "id": 2, "name": "Medium Risk Nurture", "status": "Scheduled",
+        "target": "Medium", "reach": 8762, "opened": 0, "converted": 0,
+        "created": "2024-11-10", "type": "SMS",
+        "message": "Exclusive offer just for you - earn 2x rewards on every UPI transaction this week!",
+    },
+    {
+        "id": 3, "name": "Loyalty Rewards Q4", "status": "Completed",
+        "target": "Low", "reach": 88417, "opened": 54230, "converted": 18900,
+        "created": "2024-10-01", "type": "Push",
+        "message": "Thank you for being a loyal ClientPulse user. Enjoy a ₹50 cashback on your next 5 transactions.",
+    },
+]
+_campaign_id = 4
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if "user" in session:
+        return redirect(url_for("index"))
+    error = None
+    if request.method == "POST":
+        email    = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "").strip()
+        if email in DEMO_USERS and DEMO_USERS[email]["password"] == password:
+            session["user"]  = email
+            session["role"]  = DEMO_USERS[email]["role"]
+            session["uname"] = DEMO_USERS[email]["name"]
+            return redirect(url_for("index"))
+        error = "Invalid credentials. Please try again."
+    return render_template("login.html", error=error)
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+@app.route("/")
+@login_required
+def index():
+    return render_template("dashboard.html",
+                           user=session.get("uname"),
+                           role=session.get("role"))
+
+# ── Existing APIs ─────────────────────────────────────────────────────────────
+@app.route("/api/stats")
+@login_required
+def stats():
+    total  = len(USERS)
+    high   = sum(1 for u in USERS if u["churn"]=="High")
+    medium = sum(1 for u in USERS if u["churn"]=="Medium")
+    low    = sum(1 for u in USERS if u["churn"]=="Low")
+    return jsonify({
+        "total": total, "high": high, "medium": medium, "low": low,
+        "high_pct":   round(high/total*100,1),
+        "medium_pct": round(medium/total*100,1),
+        "low_pct":    round(low/total*100,1),
+        "cities": len(CITIES),
+    })
+
+@app.route("/api/map_data")
+@login_required
+def map_data():
+    out = {}
+    for city, meta in CITIES.items():
+        cu = [u for u in USERS if u["city"]==city]
+        total  = len(cu)
+        high   = sum(1 for u in cu if u["churn"]=="High")
+        medium = sum(1 for u in cu if u["churn"]=="Medium")
+        low    = sum(1 for u in cu if u["churn"]=="Low")
+        ratio  = high/total if total else 0
+        level  = "High" if ratio>=0.03 else ("Medium" if ratio>=0.015 else "Low")
+        out[city] = {
+            "lat": meta["coords"][0], "lng": meta["coords"][1],
+            "state": meta["state"],
+            "total": total, "high": high, "medium": medium, "low": low,
+            "ratio": round(ratio,4), "level": level,
+        }
+    return jsonify(out)
+
+@app.route("/api/city/<city_name>")
+@login_required
+def city_users(city_name):
+    page    = int(request.args.get("page", 1))
+    risk    = request.args.get("risk", "all")
+    search  = request.args.get("search", "").lower()
+    per_page = 20
+    users = [u for u in USERS if u["city"] == city_name]
+    if risk != "all":
+        users = [u for u in users if u["churn"] == risk]
+    if search:
+        users = [u for u in users if search in u["name"].lower()]
+    total = len(users)
+    users = users[(page-1)*per_page : page*per_page]
+    return jsonify({"users": users, "total": total, "page": page, "per_page": per_page})
+
+@app.route("/api/user/<int:user_id>")
+@login_required
+def user_detail(user_id):
+    u = next((u for u in USERS if u["id"] == user_id), None)
+    if not u:
+        return jsonify({"error": "Not found"}), 404
+    # Build a 6-month transaction trend
+    trend = []
+    months = ["Jun","Jul","Aug","Sep","Oct","Nov"]
+    base = u["transactions"]
+    for m in months:
+        trend.append({"month": m, "txn": max(1, base + random.randint(-5, 5))})
+    return jsonify({**u, "trend": trend})
+
+@app.route("/api/models")
+@login_required
+def models():
+    return jsonify(MODEL_RESULTS)
+
+@app.route("/api/features")
+@login_required
+def features():
+    return jsonify(FEATURE_IMPORTANCE)
+
+# ── AI Insights API ───────────────────────────────────────────────────────────
+@app.route("/api/insights")
+@login_required
+def insights():
+    high_users  = [u for u in USERS if u["churn"]=="High"]
+    top_cities  = {}
+    for u in high_users:
+        top_cities[u["city"]] = top_cities.get(u["city"], 0) + 1
+    top3 = sorted(top_cities.items(), key=lambda x: x[1], reverse=True)[:3]
+
+    avg_last_active = round(sum(u["last_active"] for u in high_users) / len(high_users), 1)
+    avg_complaints  = round(sum(u["complaints"]  for u in high_users) / len(high_users), 1)
+
+    return jsonify({
+        "summary": f"{len(high_users):,} users at high churn risk ({round(len(high_users)/len(USERS)*100,1)}% of base).",
+        "top_risk_cities": [{"city": c, "count": n} for c, n in top3],
+        "avg_last_active_days": avg_last_active,
+        "avg_complaints": avg_complaints,
+        "recommendation": (
+            "Focus immediate retention on Delhi and Mumbai high-risk segments. "
+            "Users with 30+ inactive days and 3+ complaints show 94% churn correlation. "
+            "A targeted SMS campaign offering cashback may recover ~18% of high-risk users."
+        ),
+        "trend": [
+            {"month": "Jun", "high": 2650, "medium": 8400},
+            {"month": "Jul", "high": 2710, "medium": 8500},
+            {"month": "Aug", "high": 2760, "medium": 8620},
+            {"month": "Sep", "high": 2790, "medium": 8700},
+            {"month": "Oct", "high": 2810, "medium": 8740},
+            {"month": "Nov", "high": 2821, "medium": 8762},
+        ],
+    })
+
+# ── Campaigns API ─────────────────────────────────────────────────────────────
+@app.route("/api/campaigns", methods=["GET"])
+@login_required
+def get_campaigns():
+    return jsonify(CAMPAIGNS)
+
+@app.route("/api/campaigns", methods=["POST"])
+@login_required
+def create_campaign():
+    global _campaign_id
+    data = request.json
+    target = data.get("target", "High")
+    reach  = sum(1 for u in USERS if u["churn"] == target)
+    camp = {
+        "id":        _campaign_id,
+        "name":      data.get("name", "New Campaign"),
+        "status":    "Scheduled",
+        "target":    target,
+        "reach":     reach,
+        "opened":    0,
+        "converted": 0,
+        "created":   datetime.now().strftime("%Y-%m-%d"),
+        "type":      data.get("type", "Email"),
+        "message":   data.get("message", ""),
+    }
+    CAMPAIGNS.append(camp)
+    _campaign_id += 1
+    return jsonify(camp), 201
+
+@app.route("/api/campaigns/<int:cid>", methods=["DELETE"])
+@login_required
+def delete_campaign(cid):
+    global CAMPAIGNS
+    CAMPAIGNS = [c for c in CAMPAIGNS if c["id"] != cid]
+    return jsonify({"ok": True})
+
+# ── Export API ────────────────────────────────────────────────────────────────
+@app.route("/api/export/csv")
+@login_required
+def export_csv():
+    risk   = request.args.get("risk", "all")
+    city   = request.args.get("city", "all")
+    limit  = int(request.args.get("limit", 1000))
+    users  = USERS
+    if risk != "all":
+        users = [u for u in users if u["churn"] == risk]
+    if city != "all":
+        users = [u for u in users if u["city"] == city]
+    users = users[:limit]
+
+    si = io.StringIO()
+    writer = csv.DictWriter(si, fieldnames=["id","name","city","churn","risk_score",
+                                             "transactions","last_active","complaints","phone"])
+    writer.writeheader()
+    for u in users:
+        writer.writerow({k: u[k] for k in ["id","name","city","churn","risk_score",
+                                             "transactions","last_active","complaints","phone"]})
+    output = make_response(si.getvalue())
+    output.headers["Content-Disposition"] = "attachment; filename=clientpulse_export.csv"
+    output.headers["Content-type"] = "text/csv"
+    return output
+
+if __name__ == "__main__":
+    app.run(debug=True)
